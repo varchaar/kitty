@@ -56,6 +56,7 @@ typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR
 #include "wayland-xdg-decoration-unstable-v1-client-protocol.h"
 #include "wayland-relative-pointer-unstable-v1-client-protocol.h"
 #include "wayland-pointer-constraints-unstable-v1-client-protocol.h"
+#include "wayland-pointer-gestures-unstable-v1-client-protocol.h"
 #include "wayland-primary-selection-unstable-v1-client-protocol.h"
 #include "wayland-primary-selection-unstable-v1-client-protocol.h"
 #include "wayland-xdg-activation-v1-client-protocol.h"
@@ -326,6 +327,8 @@ typedef struct _GLFWlibraryWayland
     struct zxdg_decoration_manager_v1*      decorationManager;
     struct zwp_relative_pointer_manager_v1* relativePointerManager;
     struct zwp_pointer_constraints_v1*      pointerConstraints;
+    struct zwp_pointer_gestures_v1*         pointerGestures;
+    struct zwp_pointer_gesture_hold_v1*     pointerGestureHold;
     struct wl_data_source*                  dataSourceForClipboard;
     struct zwp_primary_selection_device_manager_v1* primarySelectionDeviceManager;
     struct zwp_primary_selection_device_v1*    primarySelectionDevice;
@@ -355,6 +358,16 @@ typedef struct _GLFWlibraryWayland
         GLFWid                  keyboardFocusId;
     } keyRepeatInfo;
     id_type                     cursorAnimationTimer;
+
+    struct {
+        uint64_t                start_time;
+        double                  last_x, last_y;
+        double                  velocity_x, velocity_y;
+        monotonic_t             last_time, time;
+        bool                    enable;
+        id_type                 kineticScrollTimer;
+    } kineticScrollInfo;
+
     _GLFWXKBData                xkb;
     _GLFWDBUSData               dbus;
 

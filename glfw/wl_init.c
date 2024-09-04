@@ -180,14 +180,45 @@ pointer_handle_axis_common(enum _GLFWWaylandAxisEvent type, uint32_t axis, wl_fi
         case WL_POINTER_AXIS_HORIZONTAL_SCROLL:
             switch (type) {
                 case AXIS_EVENT_UNKNOWN: break;
-                CASE(discrete, AXIS_EVENT_DISCRETE, x, fval); // wheel event
-                CASE(discrete, AXIS_EVENT_VALUE120, x, fval);  // wheel event higher res than plain discrete
-                CASE(continuous, AXIS_EVENT_CONTINUOUS, x, fval);  // touchpad, etc. high res
+                CASE(discrete, AXIS_EVENT_DISCRETE, x, -fval); // wheel event
+                CASE(discrete, AXIS_EVENT_VALUE120, x, -fval);  // wheel event higher res than plain discrete
+                CASE(continuous, AXIS_EVENT_CONTINUOUS, x, -fval);  // touchpad, etc. high res
             }
             break;
         }
     }
 #undef CASE
+}
+
+static void
+pointer_handle_kinetic_scroll(id_type timer_id UNUSED, void *data UNUSED) {
+    _GLFWwindow* window = _glfw.wl.pointerFocus;
+    if (!window) {
+        toggleTimer(&_glfw.wl.eventLoopData, _glfw.wl.kineticScrollInfo.kineticScrollTimer, 0);
+        return;
+    }
+
+    double decel_friction = 0.00004;
+
+    monotonic_t time = glfwGetTime() / 10000;
+	uint64_t time_since_start = (time - _glfw.wl.kineticScrollInfo.start_time);
+	uint64_t time_since_previous = (time - _glfw.wl.kineticScrollInfo.last_time);
+	double exp_part = exp (-decel_friction * (double)(time_since_start));
+    double new_v_x = _glfw.wl.kineticScrollInfo.velocity_x * exp_part;
+    double new_v_y = _glfw.wl.kineticScrollInfo.velocity_y * exp_part;
+	double x = new_v_x * time_since_previous;
+	double y = new_v_y * time_since_previous;
+    _glfw.wl.kineticScrollInfo.last_time = time;
+
+    double scale = (double)_glfwWaylandWindowScale(window);
+    y *= scale; x *= scale;
+    _glfwInputScroll(window, x, y, 1, _glfw.wl.xkb.states.modifiers);
+
+
+
+    if ((fabs(x) + fabs(y)) < 0.5) {
+        toggleTimer(&_glfw.wl.eventLoopData, _glfw.wl.kineticScrollInfo.kineticScrollTimer, 0);
+    }
 }
 
 static void
@@ -224,17 +255,38 @@ pointer_handle_frame(void *data UNUSED, struct wl_pointer *pointer UNUSED) {
     memset(&info, 0, sizeof(info));
 
     if (x != 0.0f || y != 0.0f) {
+        toggleTimer(&_glfw.wl.eventLoopData, _glfw.wl.kineticScrollInfo.kineticScrollTimer, 0);
+        monotonic_t time = glfwGetTime() / 10000;
+        monotonic_t time_offset = time - _glfw.wl.kineticScrollInfo.last_time;
+
+        _glfw.wl.kineticScrollInfo.velocity_x = x / time_offset;
+        _glfw.wl.kineticScrollInfo.velocity_y = y / time_offset;
+        _glfw.wl.kineticScrollInfo.last_time = time;
+
+        _glfw.wl.kineticScrollInfo.last_x = x;
+        _glfw.wl.kineticScrollInfo.last_y = y;
         float scale = (float)_glfwWaylandWindowScale(window);
         y *= scale; x *= scale;
-        _glfwInputScroll(window, -x, y, highres, _glfw.wl.xkb.states.modifiers);
+        _glfwInputScroll(window, x, y, highres, _glfw.wl.xkb.states.modifiers);
     }
 }
 
 static void
-pointer_handle_axis_source(void* data UNUSED, struct wl_pointer* pointer UNUSED, uint32_t source UNUSED) { }
+pointer_handle_axis_source(void* data UNUSED, struct wl_pointer* pointer UNUSED, uint32_t source) {
+    if (source == AXIS_EVENT_CONTINUOUS) {
+        _glfw.wl.kineticScrollInfo.enable = true;
+    } else {
+        _glfw.wl.kineticScrollInfo.enable = false;
+    }
+}
 
 static void
-pointer_handle_axis_stop(void *data UNUSED, struct wl_pointer *wl_pointer UNUSED, uint32_t time UNUSED, uint32_t axis UNUSED) { }
+pointer_handle_axis_stop(void *data UNUSED, struct wl_pointer *wl_pointer UNUSED, uint32_t time UNUSED, uint32_t axis UNUSED) {
+    if (_glfw.wl.kineticScrollInfo.enable && (fabs (_glfw.wl.kineticScrollInfo.last_x) > 2.0 || fabs (_glfw.wl.kineticScrollInfo.last_y) > 2.0)) {
+        _glfw.wl.kineticScrollInfo.start_time = glfwGetTime() / 10000;
+        toggleTimer(&_glfw.wl.eventLoopData, _glfw.wl.kineticScrollInfo.kineticScrollTimer, 1);
+    }
+}
 
 
 static void
@@ -268,6 +320,23 @@ static const struct wl_pointer_listener pointerListener = {
 #ifdef WL_POINTER_AXIS_RELATIVE_DIRECTION_SINCE_VERSION
     .axis_relative_direction = pointer_handle_axis_relative_direction,
 #endif
+};
+
+static void pointer_gesture_hold_begin(void *data UNUSED,
+		struct zwp_pointer_gesture_hold_v1 *zwp_pointer_gesture_hold_v1 UNUSED,
+		uint32_t serial UNUSED, uint32_t time UNUSED,
+		struct wl_surface *surface UNUSED, uint32_t fingers UNUSED) {
+    toggleTimer(&_glfw.wl.eventLoopData, _glfw.wl.kineticScrollInfo.kineticScrollTimer, 0);
+}
+
+static void pointer_gesture_hold_end(void *data UNUSED,
+		struct zwp_pointer_gesture_hold_v1 *zwp_pointer_gesture_hold_v1 UNUSED,
+		uint32_t serial UNUSED, uint32_t time UNUSED, int32_t cancelled UNUSED) {
+}
+
+static const struct zwp_pointer_gesture_hold_v1_listener gestureHoldListener = {
+  .begin = pointer_gesture_hold_begin,
+  .end = pointer_gesture_hold_end
 };
 
 static void keyboardHandleKeymap(void* data UNUSED,
@@ -420,6 +489,11 @@ static void seatHandleCapabilities(void* data UNUSED,
             _glfw.wl.wp_cursor_shape_device_v1 = NULL;
             _glfw.wl.wp_cursor_shape_device_v1 = wp_cursor_shape_manager_v1_get_pointer(_glfw.wl.wp_cursor_shape_manager_v1, _glfw.wl.pointer);
         }
+        if (_glfw.wl.pointerGestures) {
+            _glfw.wl.pointerGestureHold = zwp_pointer_gestures_v1_get_hold_gesture (_glfw.wl.pointerGestures, _glfw.wl.pointer);
+            zwp_pointer_gesture_hold_v1_add_listener (_glfw.wl.pointerGestureHold,
+                                                    &gestureHoldListener, NULL);
+        }
     }
     else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && _glfw.wl.pointer)
     {
@@ -550,6 +624,13 @@ static void registryHandleGlobal(void* data UNUSED,
             wl_registry_bind(registry, name,
                              &zwp_pointer_constraints_v1_interface,
                              1);
+    }
+    else if (is(zwp_pointer_gestures_v1))
+    {
+        _glfw.wl.pointerGestures =
+            wl_registry_bind(registry, name,
+                             &zwp_pointer_gestures_v1_interface,
+                             3);
     }
     else if (is(zwp_text_input_manager_v3))
     {
@@ -730,6 +811,7 @@ int _glfwPlatformInit(void)
     glfw_initialize_desktop_settings();
     _glfw.wl.keyRepeatInfo.keyRepeatTimer = addTimer(&_glfw.wl.eventLoopData, "wayland-key-repeat", ms_to_monotonic_t(500ll), 0, true, dispatchPendingKeyRepeats, NULL, NULL);
     _glfw.wl.cursorAnimationTimer = addTimer(&_glfw.wl.eventLoopData, "wayland-cursor-animation", ms_to_monotonic_t(500ll), 0, true, animateCursorImage, NULL, NULL);
+    _glfw.wl.kineticScrollInfo.kineticScrollTimer = addTimer(&_glfw.wl.eventLoopData, "kinetic-scroll", ms_to_monotonic_t(10ll), 0, true, pointer_handle_kinetic_scroll, NULL, NULL);
 
     _glfw.wl.registry = wl_display_get_registry(_glfw.wl.display);
     wl_registry_add_listener(_glfw.wl.registry, &registryListener, NULL);
